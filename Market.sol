@@ -22,7 +22,7 @@ contract Market is HederaTokenService {
         NFT_INFO_FETCH_FAILED,
         NFT_NOT_LISTED,
         NFT_TRANSFER_FAILED,
-        HBAR_TRANSFER_FAILED
+        SPH_TRANSFER_FAILED
     }
 
     /////////////////////////////////
@@ -79,8 +79,8 @@ contract Market is HederaTokenService {
     }
 
     struct BuyerTokens {
-        // total hbars in the contract
-        uint256 hbars;
+        // total sphs in the contract
+        uint256 sphs;
     }
 
     // Struct to hold NFT details
@@ -108,6 +108,7 @@ contract Market is HederaTokenService {
     // Key format: "EVM_TOKEN_ID/SERIAL_NUMBER"
     mapping(string => NFT) public nfts;
     address internal contractOwner;
+    address public spheraTokenAddress;
 
     modifier onlyContractOwner() {
         require(msg.sender == contractOwner, "Not the contract owner");
@@ -179,21 +180,37 @@ contract Market is HederaTokenService {
         buyersBidsIndexes[_buyer][nftId].isSet = false;
     }
 
-    function sendHbars(
+    function registerSpheraToken(
+        address _tokenAddress
+    ) public onlyContractOwner {
+        spheraTokenAddress = _tokenAddress;
+    }
+
+    function sendSphs(
         address sender,
         address recipient,
         uint256 amount
     ) internal {
         require(
-            buyersTokens[sender].hbars >= amount,
-            "Not enough user hbars on the contract!"
+            buyersTokens[sender].sphs >= amount,
+            "Not enough user sphs on the contract!"
         );
 
-        (bool sent, ) = recipient.call{value: amount}("");
-        require(sent, "Failed to send Hbar");
+        // (bool sent, ) = recipient.call{value: amount}("");
+        // require(sent, "Failed to send Sph");
+        int response = HederaTokenService.transferToken(
+            spheraTokenAddress,
+            address(this),
+            recipient,
+            int64(uint64(amount))
+        );
+        require(
+            response == HederaResponseCodes.SUCCESS,
+            "Failed to transfer Sphera Token"
+        );
 
         if (sender != address(this)) {
-            buyersTokens[sender].hbars -= amount;
+            buyersTokens[sender].sphs -= amount;
         }
     }
 
@@ -210,7 +227,7 @@ contract Market is HederaTokenService {
 
             // return money from bid
             if (bid.owner != moneyBackException) {
-                sendHbars(bid.owner, bid.owner, bid.amount);
+                sendSphs(bid.owner, bid.owner, bid.amount);
             }
 
             removeBidInfo(nftId, bid.owner);
@@ -327,7 +344,7 @@ contract Market is HederaTokenService {
         return response;
     }
 
-    function sendHbarsToContract() external payable returns (uint) {
+    function sendSphsToContract() external payable returns (uint) {
         return uint(MarketResponseCodes.SUCCESS);
     }
 
@@ -554,8 +571,8 @@ contract Market is HederaTokenService {
             "This buyer didn't suggest that price value for this NFT"
         );
         require(
-            buyersTokens[_buyer].hbars >= _acceptedBidAmount,
-            "Buyer doesn't have enough HBARs in the contract"
+            buyersTokens[_buyer].sphs >= _acceptedBidAmount,
+            "Buyer doesn't have enough SPHs in the contract"
         );
 
         // not sure about royalty
@@ -568,15 +585,26 @@ contract Market is HederaTokenService {
             uint256 royaltyAmount = ownerRewardAmount *
                 uint256(int256(royalty.numerator / royalty.denominator));
 
-            (bool royaltySent, ) = payable(royalty.feeCollector).call{
-                value: royaltyAmount
-            }("");
-            require(royaltySent, "Failed to send royalty Hbar");
+            // (bool royaltySent, ) = payable(royalty.feeCollector).call{
+            //     value: royaltyAmount
+            // }("");
+            //require(royaltySent, "Failed to send royalty Sph");
+
+            int response = HederaTokenService.transferToken(
+                spheraTokenAddress,
+                address(this),
+                royalty.feeCollector,
+                int64(uint64(royaltyAmount))
+            );
+            require(
+                response == HederaResponseCodes.SUCCESS,
+                "Failed to send royalty Sph"
+            );
 
             ownerRewardAmount -= royaltyAmount;
         }
 
-        sendHbars(_buyer, nfts[nftId].owner, ownerRewardAmount);
+        sendSphs(_buyer, nfts[nftId].owner, ownerRewardAmount);
 
         // transfer NFT
         int nftTransferResponse = this.transferFromNFT(
@@ -614,7 +642,8 @@ contract Market is HederaTokenService {
 
     function addBid(
         address _token,
-        uint256 _serialNumber
+        uint256 _serialNumber,
+        uint256 tokenAmount
     ) external payable returns (uint) {
         address payable _buyer = payable(msg.sender);
         string memory nftId = formatNftId(_token, _serialNumber);
@@ -638,11 +667,22 @@ contract Market is HederaTokenService {
             "Nft owner has been changed. Invalid NFT listing."
         );
 
+        int response = HederaTokenService.transferToken(
+            spheraTokenAddress,
+            msg.sender,
+            address(this),
+            int64(uint64(tokenAmount))
+        );
+        require(
+            response == HederaResponseCodes.SUCCESS,
+            "Failed to transfer Sphera Token"
+        );
+
         // add buyer info to contract to track buyer money in the contract
-        if (buyersTokens[_buyer].hbars == 0) {
-            buyersTokens[_buyer] = BuyerTokens({hbars: msg.value});
+        if (buyersTokens[_buyer].sphs == 0) {
+            buyersTokens[_buyer] = BuyerTokens({sphs: tokenAmount});
         } else {
-            buyersTokens[_buyer].hbars += msg.value;
+            buyersTokens[_buyer].sphs += tokenAmount;
         }
 
         BidIndexes memory prevBidIndex = buyersBidsIndexes[_buyer][nftId];
@@ -650,15 +690,16 @@ contract Market is HederaTokenService {
         if (buyersBidsIndexes[_buyer][nftId].isSet) {
             Bid memory _previousBid = tokenBids[nftId][prevBidIndex.tokenIndex];
 
-            sendHbars(_buyer, _buyer, _previousBid.amount);
+            sendSphs(_buyer, _buyer, _previousBid.amount);
 
-            tokenBids[nftId][prevBidIndex.tokenIndex].amount = msg.value;
+            tokenBids[nftId][prevBidIndex.tokenIndex].amount = tokenAmount;
             receivedBids[nfts[nftId].owner][prevBidIndex.receivedIndex]
-                .amount = msg.value;
-            sentBids[_buyer][prevBidIndex.sentIndex].amount = msg.value;
+                .amount = tokenAmount;
+            sentBids[_buyer][prevBidIndex.sentIndex].amount = tokenAmount;
 
-            if (msg.value >= nfts[nftId].price) {
-                return this.acceptBid(_token, _serialNumber, _buyer, msg.value);
+            if (tokenAmount >= nfts[nftId].price) {
+                return
+                    this.acceptBid(_token, _serialNumber, _buyer, tokenAmount);
             }
 
             emit AddBid(
@@ -666,14 +707,14 @@ contract Market is HederaTokenService {
                 _serialNumber,
                 nftInfo.ownerId,
                 msg.sender,
-                msg.value
+                tokenAmount
             );
             return uint(MarketResponseCodes.SUCCESS);
         }
 
         // add bid and save its index
         Bid memory bid = Bid({
-            amount: msg.value,
+            amount: tokenAmount,
             owner: _buyer,
             token: _token,
             serialNumber: _serialNumber
@@ -690,7 +731,7 @@ contract Market is HederaTokenService {
             isSet: true
         });
 
-        if (msg.value >= nfts[nftId].price) {
+        if (tokenAmount >= nfts[nftId].price) {
             return this.acceptBid(_token, _serialNumber, _buyer, bid.amount);
         }
 
@@ -699,7 +740,7 @@ contract Market is HederaTokenService {
             _serialNumber,
             nftInfo.ownerId,
             msg.sender,
-            msg.value
+            tokenAmount
         );
         return uint(MarketResponseCodes.SUCCESS);
     }
@@ -724,14 +765,13 @@ contract Market is HederaTokenService {
         Bid memory bid = tokenBids[nftId][bidTokenIndex];
 
         require(
-            buyersTokens[_buyer].hbars >=
-                tokenBids[nftId][bidTokenIndex].amount,
+            buyersTokens[_buyer].sphs >= tokenBids[nftId][bidTokenIndex].amount,
             "You have no enough money in the contract to delete bid"
         );
 
         emit DeleteBid(_token, _serialNumber, msg.sender, bid.amount);
 
-        sendHbars(_buyer, _buyer, bid.amount);
+        sendSphs(_buyer, _buyer, bid.amount);
         removeBidInfo(nftId, bid.owner);
 
         return uint(MarketResponseCodes.SUCCESS);
